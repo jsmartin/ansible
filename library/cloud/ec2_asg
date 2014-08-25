@@ -130,6 +130,8 @@ ASG_ATTRIBUTES = ('availability_zones', 'default_cooldown', 'desired_capacity',
     'load_balancers', 'max_size', 'min_size', 'name', 'placement_group',
     'tags', 'termination_policies', 'vpc_zone_identifier')
 
+INSTANCE_ATTRIBUTES = ('instance_id', 'health_status', 'lifecycle_state', 'launch_config_name')
+
 def enforce_required_arguments(module):
     ''' As many arguments are not required for autoscale group deletion
         they cannot be mandatory arguments for the module, so we enforce
@@ -144,9 +146,26 @@ def enforce_required_arguments(module):
 
 def get_properties(autoscaling_group):
     properties = dict((attr, getattr(autoscaling_group, attr)) for attr in ASG_ATTRIBUTES)
+    properties['healthy_instances'] = 0
+    properties['in_service_instances'] = 0
+    properties['unhealthy_instances'] = 0
     if autoscaling_group.instances:
         properties['instances'] = [i.instance_id for i in autoscaling_group.instances]
+        properties['instance_facts'] = []
+        for i in autoscaling_group.instances:
+            info = dict((attr, getattr(i, attr)) for attr in INSTANCE_ATTRIBUTES)
+            properties['instance_facts'].append(info)
+        for i in properties['instance_facts']:
+            if i['health_status'] == 'Healthy':
+                properties['healthy_instances'] += 1
+            else:
+                properties['unhealthy_instances'] += 1
+            if i['lifecycle_state'] == 'InService':
+                properties['in_service_instances'] += 1
+            else:
+                properties['unhealthy_instances'] += 1
     properties['load_balancers'] = autoscaling_group.load_balancers
+
     return properties
 
 
