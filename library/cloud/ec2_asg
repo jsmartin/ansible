@@ -226,7 +226,7 @@ def get_properties(autoscaling_group):
     properties['in_service_instances'] = 0
     properties['unhealthy_instances'] = 0
     properties['pending_instances'] = 0
-    properties['viable'] = 0
+    properties['viable_instances'] = 0
     properties['terminating_instances'] = 0
 
     if autoscaling_group.instances:
@@ -237,7 +237,7 @@ def get_properties(autoscaling_group):
             properties['instance_facts'].append(info)
         for i in properties['instance_facts']:
             if i['health_status'] == 'Healthy' and i['lifecycle_state'] == 'InService':
-                properties['viable'] += 1
+                properties['viable_instances'] += 1
             if i['health_status'] == 'Healthy':
                 properties['healthy_instances'] += 1
             else:
@@ -459,7 +459,7 @@ def replace_instances(connection, module):
 
     # now we make sure that we have enough instances in a viable state
     wait_timeout = time.time() + wait_timeout
-    while wait_timeout > time.time() and props['min_size'] > props['viable']:
+    while wait_timeout > time.time() and props['min_size'] > props['viable_instances']:
         time.sleep(10)
         as_groups = connection.get_all_groups(names=[group_name])
         as_group = as_groups[0]
