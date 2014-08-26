@@ -57,6 +57,11 @@ options:
     description:
       - Desired number of instances in group
     required: false
+  instance_ids:
+    description:
+      - List of instance_ids belonging to the ASG that you would like to terminate and be replaced with instances matching the current launch configuration.
+    required: false
+    version_added: "1.8"
   region:
     description:
       - The AWS region to use. If not specified then the value of the EC2_REGION environment variable, if any, is used.
@@ -86,6 +91,11 @@ options:
     default: EC2
     version_added: "1.7"
     choices: ['EC2', 'ELB']
+  wait_timeout:
+    description:
+      - how long before wait instances to become viable when replaced.  Used in concjunction with instance_ids option.
+    default: 300
+    version_added: "1.8"
 extends_documentation_fragment: aws
 """
 
@@ -108,6 +118,72 @@ deprecated method of expressing tags:
       - key: environment
         value: production
         propagate_at_launch: no
+
+Terminating old instances and launching new ones with updated launch
+configuration.
+This could also be considered a rolling deploy of a pre-baked AMI:
+
+- name: create launch config
+  ec2_lc:
+    name: lc-new
+    image_id: ami-234231
+    key_name: foo
+    region: us-east-1
+    security_groups: sg-12345
+    instance_type: m1.small
+    assign_public_ip: yes
+
+- name: create autoscale groups
+  ec2_asg:
+    name: myasg
+    health_check_period: 60
+    load_balancers: mylb
+    health_check_type: ELB
+    availability_zones: us-east-1a
+    launch_config_name: lc-new
+    min_size: 5
+    max_size: 10
+    desired_capacity: 5
+    region: us-east-1
+    vpc_zone_identifier: vpc-12345
+  tags: autoscale_group
+
+- name: wait for number_of_healthy_instances >= asg_desired_capacity
+  ec2_asg: name=myasg region=us-east-1
+  register: result
+  until: result.healthy_instances >= asg_desired_capacity and result.in_service_instances >= asg_desired_capacity
+  delay: 10
+  retries: 120
+
+  # temporarily increase the desired_capacity and minimum_size by
+  # the batch_size
+- name: set temporary settings
+  ec2_asg: name=myasg
+           region=us-east-1
+           desired_capacity=6
+           min_size=6
+
+- name: wait for number_of_healthy_instances >= desired_capacity
+  ec2_asg: name=myasg region=us-east-1
+  register: result
+  until: result.healthy_instances >= tmp_min_size|int and result.in_service_instances >= tmp_min_size|int
+  delay: 10
+  retries: 120
+
+- name: loop through instances and terminate them
+  ec2_asg:
+    name: myasg
+    instance_ids: "{{ item }}"
+    region: us-east-1
+  with_items:
+  - "{{ result.instances | batch(1) | list }}"
+
+- name: return ASG settings to normal
+  ec2_asg: name=myasg
+           region=us-east-1
+           desired_capacity=5
+           min_size=5
+
 
 '''
 
@@ -301,6 +377,7 @@ def create_autoscaling_group(connection, module):
         load_balancers=result.load_balancers,
         min_size=result.min_size, max_size=result.max_size,
         placement_group=result.placement_group,
+        wait_timeout = dict(default=300),
         tags=result.tags,
         termination_policies=result.termination_policies,
         vpc_zone_identifier=result.vpc_zone_identifier)
@@ -333,6 +410,7 @@ def replace_instances(connection, module):
     
     instance_ids = module.params.get('instance_ids')
     group_name = module.params.get('group_name')
+    wait_timeout = int(module.params.get('wait_timeout'))
 
     as_group = connection.get_all_groups(names=[group_name])[0]
     props = get_properties(as_group)
@@ -342,6 +420,7 @@ def replace_instances(connection, module):
 
     old_instances = []
 
+    # check to make sure instances given are actually in the given ASG
     for instance_id in instance_ids:
           if instance_id in props['instances']:
               for item in props['instance_facts']:
@@ -359,7 +438,8 @@ def replace_instances(connection, module):
     # no longer in the list
 
     count = 1
-    while count > 0:
+    wait_timeout = time.time() + wait_timeout
+    while wait_timeout > time.time() and count > 0:
         count = 0
         as_group = connection.get_all_groups(names=[group_name])[0]
         props = get_properties(as_group)
@@ -369,22 +449,30 @@ def replace_instances(connection, module):
                     count += 1
         time.sleep(10)
 
+    if wait_timeout <= time.time():
+            # waiting took too long
+            module.fail_json(msg = "Waited too long for old instances to terminate. %s" % time.asctime())
+
     # make sure we have the latest stats after that last loop.
     as_group = connection.get_all_groups(names=[group_name])[0]
     props = get_properties(as_group)
 
     # now we make sure that we have enough instances in a viable state
-    while props['min_size'] > props['viable']:
+    wait_timeout = time.time() + wait_timeout
+    while wait_timeout > time.time() and props['min_size'] > props['viable']:
         time.sleep(10)
         as_groups = connection.get_all_groups(names=[group_name])
         as_group = as_groups[0]
         props = get_properties(as_group)
 
+    if wait_timeout <= time.time():
+            # waiting took too long
+            module.fail_json(msg = "Waited too long for new instances to become viable. %s" % time.asctime())
+
     # collect final stats info
     as_group = connection.get_all_groups(names=[group_name])[0]
     asg_properties = get_properties(as_group)
     result = module.exit_json(changed=True, **asg_properties) 
-
 
 
 def main():
@@ -400,6 +488,7 @@ def main():
             desired_capacity=dict(type='int'),
             vpc_zone_identifier=dict(type='str'),
             instance_ids=dict(type='list', default=[]),
+            wait_timeout=dict(type='int', default=300),
             state=dict(default='present', choices=['present', 'absent']),
             tags=dict(type='list', default=[]),
             health_check_period=dict(type='int', default=300),
