@@ -149,6 +149,10 @@ def get_properties(autoscaling_group):
     properties['healthy_instances'] = 0
     properties['in_service_instances'] = 0
     properties['unhealthy_instances'] = 0
+    properties['pending_instances'] = 0
+    properties['viable'] = 0
+    properties['terminating_instances'] = 0
+
     if autoscaling_group.instances:
         properties['instances'] = [i.instance_id for i in autoscaling_group.instances]
         properties['instance_facts'] = []
@@ -156,14 +160,18 @@ def get_properties(autoscaling_group):
             info = dict((attr, getattr(i, attr)) for attr in INSTANCE_ATTRIBUTES)
             properties['instance_facts'].append(info)
         for i in properties['instance_facts']:
+            if i['health_status'] == 'Healthy' and i['lifecycle_state'] == 'InService':
+                properties['viable'] += 1
             if i['health_status'] == 'Healthy':
                 properties['healthy_instances'] += 1
             else:
                 properties['unhealthy_instances'] += 1
             if i['lifecycle_state'] == 'InService':
                 properties['in_service_instances'] += 1
-            else:
-                properties['unhealthy_instances'] += 1
+            if i['lifecycle_state'] == 'Terminating':
+                properties['terminating_instances'] += 1
+            if i['lifecycle_state'] == 'Pending':
+                properties['pending_instances'] += 1
     properties['load_balancers'] = autoscaling_group.load_balancers
 
     return properties
@@ -321,6 +329,63 @@ def delete_autoscaling_group(connection, module):
     else:
         module.exit_json(changed=False)
 
+def replace_instances(connection, module):
+    
+    instance_ids = module.params.get('instance_ids')
+    group_name = module.params.get('group_name')
+
+    as_group = connection.get_all_groups(names=[group_name])[0]
+    props = get_properties(as_group)
+
+    # make sure that instances provided are actually part of the ASG
+    # and that they have a non-current launch configuration
+
+    old_instances = []
+
+    for instance_id in instance_ids:
+          if instance_id in props['instances']:
+              for item in props['instance_facts']:
+                  if item['instance_id'] == instance_id and item['launch_config_name'] != props['launch_config_name']:
+                    old_instances.append(instance_id)
+
+    if not old_instances:
+        result = module.exit_json(changed=False, **props) 
+
+
+    for instance_id in old_instances:
+        connection.set_instance_health(instance_id,'Unhealthy')
+    
+    # we wait to make sure the machines we marked as Unhealthy are
+    # no longer in the list
+
+    count = 1
+    while count > 0:
+        count = 0
+        as_group = connection.get_all_groups(names=[group_name])[0]
+        props = get_properties(as_group)
+        for instance in props["instance_facts"]:
+            if instance["instance_id"] in old_instances:
+                if instance["lifecycle_state"] == "Terminating" or instance["health_status"] == 'Unhealthy':
+                    count += 1
+        time.sleep(10)
+
+    # make sure we have the latest stats after that last loop.
+    as_group = connection.get_all_groups(names=[group_name])[0]
+    props = get_properties(as_group)
+
+    # now we make sure that we have enough instances in a viable state
+    while props['min_size'] > props['viable']:
+        time.sleep(10)
+        as_groups = connection.get_all_groups(names=[group_name])
+        as_group = as_groups[0]
+        props = get_properties(as_group)
+
+    # collect final stats info
+    as_group = connection.get_all_groups(names=[group_name])[0]
+    asg_properties = get_properties(as_group)
+    result = module.exit_json(changed=True, **asg_properties) 
+
+
 
 def main():
     argument_spec = ec2_argument_spec()
@@ -334,6 +399,7 @@ def main():
             max_size=dict(type='int'),
             desired_capacity=dict(type='int'),
             vpc_zone_identifier=dict(type='str'),
+            instance_ids=dict(type='list', default=[]),
             state=dict(default='present', choices=['present', 'absent']),
             tags=dict(type='list', default=[]),
             health_check_period=dict(type='int', default=300),
@@ -343,6 +409,7 @@ def main():
     module = AnsibleModule(argument_spec=argument_spec)
 
     state = module.params.get('state')
+    instance_ids = module.params.get('instance_ids')
 
     region, ec2_url, aws_connect_params = get_aws_connection_info(module)
     try:
@@ -352,9 +419,12 @@ def main():
     except boto.exception.NoAuthHandlerFound, e:
         module.fail_json(msg=str(e))
 
+    if instance_ids:
+        replace_instances(connection, module)
     if state == 'present':
         create_autoscaling_group(connection, module)
     elif state == 'absent':
         delete_autoscaling_group(connection, module)
+
 
 main()
