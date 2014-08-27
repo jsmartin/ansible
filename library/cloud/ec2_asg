@@ -231,25 +231,28 @@ def get_properties(autoscaling_group):
 
     if autoscaling_group.instances:
         properties['instances'] = [i.instance_id for i in autoscaling_group.instances]
-        properties['instance_facts'] = []
+        instance_facts = {}
         for i in autoscaling_group.instances:
-            info = dict((attr, getattr(i, attr)) for attr in INSTANCE_ATTRIBUTES)
-            properties['instance_facts'].append(info)
-        for i in properties['instance_facts']:
-            if i['health_status'] == 'Healthy' and i['lifecycle_state'] == 'InService':
+            #info = dict((attr, getattr(i, attr)) for attr in INSTANCE_ATTRIBUTES)
+            #properties['instance_facts'].append(info)
+            instance_facts[i.instance_id] = {'health_status': i.health_status,
+                                            'lifecycle_state': i.lifecycle_state,
+                                            'launch_config_name': i.launch_config_name }
+        
+            if i.health_status == 'Healthy' and i.lifecycle_state == 'InService':
                 properties['viable_instances'] += 1
-            if i['health_status'] == 'Healthy':
+            if i.health_status == 'Healthy':
                 properties['healthy_instances'] += 1
             else:
                 properties['unhealthy_instances'] += 1
-            if i['lifecycle_state'] == 'InService':
+            if i.lifecycle_state == 'InService':
                 properties['in_service_instances'] += 1
-            if i['lifecycle_state'] == 'Terminating':
+            if i.lifecycle_state == 'Terminating':
                 properties['terminating_instances'] += 1
-            if i['lifecycle_state'] == 'Pending':
+            if i.lifecycle_state == 'Pending':
                 properties['pending_instances'] += 1
     properties['load_balancers'] = autoscaling_group.load_balancers
-
+    properties['instance_facts'] = instance_facts
     return properties
 
 
@@ -421,15 +424,14 @@ def replace_instances(connection, module):
     old_instances = []
 
     # check to make sure instances given are actually in the given ASG
-    for instance_id in instance_ids:
-          if instance_id in props['instances']:
-              for item in props['instance_facts']:
-                  if item['instance_id'] == instance_id and item['launch_config_name'] != props['launch_config_name']:
-                    old_instances.append(instance_id)
+    # and they have a non-current launch config
+    instances = ( inst_id for inst_id in instance_ids if inst_id in props['instances'])
+    for instance in instances:
+       if props['instance_facts'][instance]['launch_config_name']  != props['launch_config_name']:
+            old_instances.append(instance)
 
     if not old_instances:
-        result = module.exit_json(changed=False, **props) 
-
+        result = module.exit_json(changed=False, **props)
 
     for instance_id in old_instances:
         connection.set_instance_health(instance_id,'Unhealthy')
@@ -443,10 +445,11 @@ def replace_instances(connection, module):
         count = 0
         as_group = connection.get_all_groups(names=[group_name])[0]
         props = get_properties(as_group)
-        for instance in props["instance_facts"]:
-            if instance["instance_id"] in old_instances:
-                if instance["lifecycle_state"] == "Terminating" or instance["health_status"] == 'Unhealthy':
-                    count += 1
+        instances = ( i for i in props['instance_facts'] if i in old_instances)
+        for i in instances:
+            if  ( props["instance_facts"][i]["lifecycle_state"] == "Terminating"
+                 or props["instance_facts"][i]["health_status"] == 'Unhealthy' ):
+                count += 1
         time.sleep(10)
 
     if wait_timeout <= time.time():
