@@ -57,9 +57,9 @@ options:
     description:
       - Desired number of instances in group
     required: false
-  instance_ids:
+  replace_instances:
     description:
-      - List of instance_ids belonging to the ASG that you would like to terminate and be replaced with instances matching the current launch configuration.
+      - List of instance_ids belonging to the named ASG that you would like to terminate and be replaced with instances matching the current launch configuration.
     required: false
     version_added: "1.8"
   region:
@@ -173,7 +173,7 @@ This could also be considered a rolling deploy of a pre-baked AMI:
 - name: loop through instances and terminate them
   ec2_asg:
     name: myasg
-    instance_ids: "{{ item }}"
+    replace_instances: "{{ item }}"
     region: us-east-1
   with_items:
   - "{{ result.instances | batch(1) | list }}"
@@ -251,8 +251,8 @@ def get_properties(autoscaling_group):
                 properties['terminating_instances'] += 1
             if i.lifecycle_state == 'Pending':
                 properties['pending_instances'] += 1
+        properties['instance_facts'] = instance_facts
     properties['load_balancers'] = autoscaling_group.load_balancers
-    properties['instance_facts'] = instance_facts
     return properties
 
 
@@ -409,9 +409,9 @@ def delete_autoscaling_group(connection, module):
     else:
         module.exit_json(changed=False)
 
-def replace_instances(connection, module):
+def replace(connection, module):
     
-    instance_ids = module.params.get('instance_ids')
+    replace_instances = module.params.get('replace_instances')
     group_name = module.params.get('group_name')
     wait_timeout = int(module.params.get('wait_timeout'))
 
@@ -425,10 +425,10 @@ def replace_instances(connection, module):
 
     # check to make sure instances given are actually in the given ASG
     # and they have a non-current launch config
-    instances = ( inst_id for inst_id in instance_ids if inst_id in props['instances'])
-    for instance in instances:
-       if props['instance_facts'][instance]['launch_config_name']  != props['launch_config_name']:
-            old_instances.append(instance)
+    instances = ( inst_id for inst_id in replace_instances if inst_id in props['instances'])
+    for i in instances:
+       if props['instance_facts'][i]['launch_config_name']  != props['launch_config_name']:
+            old_instances.append(i)
 
     if not old_instances:
         result = module.exit_json(changed=False, **props)
@@ -445,10 +445,11 @@ def replace_instances(connection, module):
         count = 0
         as_group = connection.get_all_groups(names=[group_name])[0]
         props = get_properties(as_group)
-        instances = ( i for i in props['instance_facts'] if i in old_instances)
+        instance_facts = props['instance_facts']
+        instances = ( i for i in instance_facts if i in old_instances)
         for i in instances:
-            if  ( props["instance_facts"][i]["lifecycle_state"] == "Terminating"
-                 or props["instance_facts"][i]["health_status"] == 'Unhealthy' ):
+            if  ( instance_facts[i]['lifecycle_state'] == 'Terminating'
+                 or instance_facts[i]['health_status'] == 'Unhealthy' ):
                 count += 1
         time.sleep(10)
 
@@ -490,7 +491,7 @@ def main():
             max_size=dict(type='int'),
             desired_capacity=dict(type='int'),
             vpc_zone_identifier=dict(type='str'),
-            instance_ids=dict(type='list', default=[]),
+            replace_instances=dict(type='list', default=[]),
             wait_timeout=dict(type='int', default=300),
             state=dict(default='present', choices=['present', 'absent']),
             tags=dict(type='list', default=[]),
@@ -501,7 +502,7 @@ def main():
     module = AnsibleModule(argument_spec=argument_spec)
 
     state = module.params.get('state')
-    instance_ids = module.params.get('instance_ids')
+    replace_instances = module.params.get('replace_instances')
 
     region, ec2_url, aws_connect_params = get_aws_connection_info(module)
     try:
@@ -511,8 +512,8 @@ def main():
     except boto.exception.NoAuthHandlerFound, e:
         module.fail_json(msg=str(e))
 
-    if instance_ids:
-        replace_instances(connection, module)
+    if replace_instances:
+        replace(connection, module)
     if state == 'present':
         create_autoscaling_group(connection, module)
     elif state == 'absent':
