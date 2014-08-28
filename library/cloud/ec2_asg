@@ -233,12 +233,9 @@ def get_properties(autoscaling_group):
         properties['instances'] = [i.instance_id for i in autoscaling_group.instances]
         instance_facts = {}
         for i in autoscaling_group.instances:
-            #info = dict((attr, getattr(i, attr)) for attr in INSTANCE_ATTRIBUTES)
-            #properties['instance_facts'].append(info)
             instance_facts[i.instance_id] = {'health_status': i.health_status,
                                             'lifecycle_state': i.lifecycle_state,
                                             'launch_config_name': i.launch_config_name }
-        
             if i.health_status == 'Healthy' and i.lifecycle_state == 'InService':
                 properties['viable_instances'] += 1
             if i.health_status == 'Healthy':
@@ -430,9 +427,11 @@ def replace(connection, module):
        if props['instance_facts'][i]['launch_config_name']  != props['launch_config_name']:
             old_instances.append(i)
 
+    # exit if we have no valid instances
     if not old_instances:
         result = module.exit_json(changed=False, **props)
 
+    # set all instances given to unhealth
     for instance_id in old_instances:
         connection.set_instance_health(instance_id,'Unhealthy')
     
